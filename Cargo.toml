@@ -21,6 +21,7 @@ serde_json = "1.0.67"
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.1", optional = true }
 futures = "0.3.21"
+uuid = { version = "0.8.2", features = ["v4", "wasm-bindgen"] }
 
 [profile.release]
 # Tell `rustc` to optimize for small code size.

@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{sync::Arc, collections::HashMap};
 
 use futures::{lock::Mutex, StreamExt};
+use uuid::Uuid;
 
 use crate::*;
 
@@ -11,7 +12,7 @@ pub struct Relay {
 
 struct InnerRelay {
     env: Env,
-    sockets: Vec<WebSocket>,
+    sockets: HashMap<Uuid, Arc<WebSocket>>,
     connections: usize,
 }
 
@@ -20,7 +21,7 @@ impl DurableObject for Relay {
     fn new(state: State, env: Env) -> Self {
         let inner = InnerRelay {
             env,
-            sockets: Vec::new(),
+            sockets: HashMap::new(),
             connections: 0,
         };
 
@@ -44,13 +45,27 @@ impl DurableObject for Relay {
 }
 
 async fn subscriber(_: Request, ctx: RouteContext<Arc<Mutex<InnerRelay>>>) -> Result<Response> {
+    let id = Uuid::new_v4();
     let WebSocketPair { client, server } = WebSocketPair::new()?;
-
-    server.accept()?;
+    let server = Arc::new(server);
 
     let mut inner = ctx.data.lock().await;
-    inner.sockets.push(server);
+    inner.sockets.insert(id, server.clone());
     inner.connections += 1;
+    
+    server.accept()?;
+    
+    let inner_lock = ctx.data.clone();
+
+    wasm_bindgen_futures::spawn_local(async move {
+        // Wait for the connection to close.
+        let stream = server.events().unwrap();
+        let _ = stream.count().await;
+
+        let mut inner = inner_lock.lock().await;
+        inner.sockets.remove(&id);
+        inner.connections -= 1;
+    });
 
     Response::from_websocket(client)
 }
@@ -73,13 +88,13 @@ async fn publisher(_: Request, ctx: RouteContext<Arc<Mutex<InnerRelay>>>) -> Res
             match event {
                 WebsocketEvent::Message(msg) => {
                     if let Some(text) = msg.text() {
-                        for socket in sockets {
+                        for socket in sockets.values_mut() {
                             socket.send_with_str(&text).unwrap();
                         }
                     }
                 }
                 WebsocketEvent::Close(_) => {
-                    for socket in sockets.drain(0..) {
+                    for (_, socket) in sockets.drain() {
                         socket.close::<String>(Some(1001), None).unwrap();
                     }
 
